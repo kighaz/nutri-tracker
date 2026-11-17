@@ -43,7 +43,9 @@ async function authed() {
 const UNAUTH = { ok: false, error: "error.unauthenticated" } as const;
 
 function dbError(prefix: string, e: { message?: string; code?: string } | null | undefined) {
-  return { ok: false, error: `${prefix}: ${e?.message ?? "unknown error"}${e?.code ? ` (${e.code})` : ""}` } as const;
+  // Details stay in the server logs; the browser only receives a translatable generic key.
+  console.error(prefix, e?.code ?? "", e?.message ?? "");
+  return { ok: false, error: "common.error" } as const;
 }
 
 function vectorFromRow(row: Record<string, unknown>): NutrientVector {
@@ -111,8 +113,8 @@ export async function saveProfile(p: UserProfile): Promise<ActionResult<true>> {
 export async function saveMeal(input: SaveMealInput): Promise<ActionResult<{ id: string }>> {
   const a = await authed();
   if (!a) return UNAUTH;
-  if (!DATE_RE.test(input.date) || !MEALS.includes(input.mealType) || !input.items?.length) {
-    return { ok: false, error: `Failed to save meal: invalid input (date=${input.date}, meal=${input.mealType}, items=${input.items?.length ?? 0})` };
+  if (!DATE_RE.test(input.date) || !MEALS.includes(input.mealType) || !input.items?.length || input.items.length > 50) {
+    return { ok: false, error: "common.error" };
   }
   const { data: meal, error } = await a.supabase
     .from("meal_logs")
@@ -136,7 +138,7 @@ export async function saveMeal(input: SaveMealInput): Promise<ActionResult<{ id:
     }));
   if (rows.length === 0) {
     await a.supabase.from("meal_logs").delete().eq("id", meal.id);
-    return { ok: false, error: "Failed to save meal: no item with a weight above 0 g" };
+    return { ok: false, error: "common.error" };
   }
   const { error: itemsError } = await a.supabase.from("meal_log_items").insert(rows);
   if (itemsError) {
@@ -209,7 +211,7 @@ export async function saveRecipe(input: SaveRecipeInput): Promise<ActionResult<{
   if (!a) return UNAUTH;
   const name = input.name?.trim().slice(0, 160);
   const ingredients = (input.ingredients ?? []).filter((i) => i.grams > 0);
-  if (!name || !ingredients.length) return { ok: false, error: "common.error" };
+  if (!name || !ingredients.length || ingredients.length > 100) return { ok: false, error: "common.error" };
 
   const calc = computeRecipe(
     ingredients.map((i) => ({ grams: i.grams, per100g: cleanVector(i.per100g) })),

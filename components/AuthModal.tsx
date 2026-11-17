@@ -9,8 +9,9 @@ import { LANGS } from "@/types/nutrition";
 /** Marker used to honour an unchecked "Stay signed in": the session is dropped when the browser is closed. */
 export const EPHEMERAL_KEY = "nutri.ephemeral";
 
-export function AuthModal({ onAuthenticated }: { onAuthenticated: () => void }) {
+export function AuthModal({ onAuthenticated, onOpenLegal }: { onAuthenticated: () => void; onOpenLegal: () => void }) {
   const { t, lang, setLang } = useI18n();
+  const [consent, setConsent] = useState(false);
   const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -38,12 +39,20 @@ export function AuthModal({ onAuthenticated }: { onAuthenticated: () => void }) 
       setMessage({ ok: false, text: t("auth.weak") });
       return;
     }
+    if (mode === "signup" && !consent) {
+      setMessage({ ok: false, text: t("auth.ageRequired") });
+      return;
+    }
     setBusy(true);
     try {
       const supabase = createSupabaseBrowserClient();
       const creds = { email: email.trim(), password };
       if (mode === "signup") {
-        const { data, error } = await supabase.auth.signUp(creds);
+        // Consent proof (age >= 16 + privacy policy) is stored in the user's auth metadata.
+        const { data, error } = await supabase.auth.signUp({
+          ...creds,
+          options: { data: { age_confirmed_16: true, privacy_consent_at: new Date().toISOString() } },
+        });
         if (error) throw error;
         if (data.session) {
           remember();
@@ -115,6 +124,12 @@ export function AuthModal({ onAuthenticated }: { onAuthenticated: () => void }) 
           <input type="checkbox" checked={stay} onChange={(e) => setStay(e.target.checked)} className="h-4 w-4 accent-green-600" />
           {t("auth.stay")}
         </label>
+        {mode === "signup" && (
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-4 w-4 shrink-0 accent-green-600" />
+            <span className="min-w-0 break-words">{t("auth.ageConsent")}</span>
+          </label>
+        )}
         {message && <p className={`text-sm ${message.ok ? "text-green-700 dark:text-green-400" : "text-red-600"}`}>{message.text}</p>}
         <button
           type="submit"
@@ -135,6 +150,9 @@ export function AuthModal({ onAuthenticated }: { onAuthenticated: () => void }) 
           {mode === "signin" ? t("auth.noAccount") : t("auth.haveAccount")}
         </button>
       </form>
+      <button type="button" onClick={onOpenLegal} className="w-full text-center text-xs text-neutral-500 underline">
+        {t("legal.open")}
+      </button>
     </div>
   );
 }

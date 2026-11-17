@@ -9,6 +9,7 @@ import { resolveTargets, toDateKey } from "@/lib/targets";
 import { DEFAULT_PROFILE, type ResolvedItem, type UserProfile } from "@/types/nutrition";
 import { AppGuideModal } from "./AppGuideModal";
 import { AuthModal, EPHEMERAL_KEY } from "./AuthModal";
+import { LegalModal } from "./LegalModal";
 import { CaptureModule } from "./CaptureModule";
 import { DecompositionCard } from "./DecompositionCard";
 import { DiaryCalendar } from "./DiaryCalendar";
@@ -30,6 +31,7 @@ export function AppShell() {
   const [diaryDate, setDiaryDate] = useState(() => toDateKey(new Date()));
   const [refreshKey, setRefreshKey] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
+  const [legalOpen, setLegalOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -137,6 +139,7 @@ export function AppShell() {
         )}
         {authState === "signedOut" && (
           <AuthModal
+            onOpenLegal={() => setLegalOpen(true)}
             onAuthenticated={async () => {
               await loadProfile();
               setAuthState("ready");
@@ -170,6 +173,13 @@ export function AppShell() {
         )}
         {authState === "ready" && tab === "diary" && <DiaryCalendar key={diaryDate} targets={targets} refreshKey={refreshKey} initialDate={diaryDate} />}
         {authState === "ready" && tab === "recipes" && <RecipeBuilder />}
+        {authState === "ready" && (
+          <p className="pt-4 text-center">
+            <button onClick={() => setLegalOpen(true)} className="text-xs text-neutral-500 underline">
+              {t("legal.open")}
+            </button>
+          </p>
+        )}
       </main>
 
       {authState === "ready" && (
@@ -191,7 +201,8 @@ export function AppShell() {
         </nav>
       )}
 
-      <AppGuideModal open={guideOpen} onClose={closeGuide} />
+      <AppGuideModal open={guideOpen} onClose={closeGuide} onOpenLegal={() => setLegalOpen(true)} />
+      <LegalModal open={legalOpen} onClose={() => setLegalOpen(false)} />
       {settingsOpen && <TargetEditor open profile={profile} onClose={() => setSettingsOpen(false)} onSaved={setProfile} />}
     </div>
   );

@@ -14,6 +14,7 @@ import {
   type NutrientKey,
   type UserProfile,
 } from "@/types/nutrition";
+import { AccountPanel } from "./AccountPanel";
 import { formatAmount } from "./NutrientBars";
 
 const ACTIVITIES: ActivityLevel[] = ["sedentary", "light", "moderate", "active", "very_active"];
@@ -187,6 +188,8 @@ export function TargetEditor({
               </ul>
             </section>
           ))}
+
+          <AccountPanel />
         </div>
 
         <div className="border-t border-neutral-200 p-4 dark:border-neutral-800">

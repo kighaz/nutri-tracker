@@ -1,7 +1,7 @@
 "use server";
 
 import { GoogleGenAI } from "@google/genai";
-import { createSupabaseServerClient } from "@/lib/supabase";
+import { guard } from "@/lib/guard";
 import {
   buildCustomContext,
   fetchOpenFoodFactsBarcode,
@@ -33,6 +33,9 @@ const GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"; // used on 429/5xx of the
 
 const MAX_BASE64_CHARS = 1_400_000; // ~1 MB of image data after client-side compression
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+const AI_MAX_PER_HOUR = 40; // Gemini calls per user per hour (photo, text, recipe paste, backfill)
+const SEARCH_MAX_PER_MINUTE = 60; // OpenFoodFacts / USDA lookups per user per minute
 
 // ---------------------------------------------------------------------------
 // JSON schema for structured output
@@ -187,22 +190,21 @@ export async function analyzeFood(input: AnalyzeFoodInput): Promise<AnalyzeFoodR
   try {
     if (!imageBase64 && !text) return { ok: false, error: "error.noInput" };
     if (imageBase64) {
-      if (imageBase64.length > MAX_BASE64_CHARS) return { ok: false, error: "error.imageTooLarge" };
-      if (!ALLOWED_MIME.has(mimeType)) return { ok: false, error: "error.imageTooLarge" };
+      if (typeof imageBase64 !== "string" || imageBase64.length > MAX_BASE64_CHARS) return { ok: false, error: "error.imageTooLarge" };
+      if (!ALLOWED_MIME.has(mimeType) || !BASE64_RE.test(imageBase64)) return { ok: false, error: "error.imageTooLarge" };
     }
 
-    const supabase = await createSupabaseServerClient();
-    const { data: userData } = await supabase.auth.getUser();
-    const userId = userData.user?.id ?? null;
+    // Auth + quota gate (cheap checks above run first so bad payloads never cost a DB call).
+    const g = await guard("ai", AI_MAX_PER_HOUR, 3600);
+    if (!g.ok) return { ok: false, error: g.error };
+    const { supabase, userId } = g;
     const warnings: string[] = [];
 
     let catalog: CustomCatalog = [];
-    if (userId) {
-      try {
-        catalog = await loadCustomCatalog(supabase, userId);
-      } catch {
-        warnings.push("custom_catalog_unavailable");
-      }
+    try {
+      catalog = await loadCustomCatalog(supabase, userId);
+    } catch {
+      warnings.push("custom_catalog_unavailable");
     }
 
     const parts: Part[] = [];
@@ -249,7 +251,7 @@ export async function analyzeFood(input: AnalyzeFoodInput): Promise<AnalyzeFoodR
     });
     for (const it of items) if (it.source_ref_id === "") it.source = "ai_estimate";
 
-    return { ok: true, items, authenticated: Boolean(userId), warnings };
+    return { ok: true, items, authenticated: true, warnings };
   } catch {
     return { ok: false, error: "common.error" };
   } finally {
@@ -264,9 +266,9 @@ export async function searchFoods(query: string, lang: Lang): Promise<SearchFood
   try {
     const q = query.trim().slice(0, 100);
     if (q.length < 2) return { ok: true, candidates: [] };
-    const supabase = await createSupabaseServerClient();
-    const { data } = await supabase.auth.getUser();
-    const catalog = data.user ? await loadCustomCatalog(supabase, data.user.id) : [];
+    const g = await guard("search", SEARCH_MAX_PER_MINUTE, 60);
+    if (!g.ok) return { ok: false, error: g.error };
+    const catalog = await loadCustomCatalog(g.supabase, g.userId);
     const candidates = await searchAllSources(q, normLang(lang), catalog);
     return { ok: true, candidates };
   } catch {
@@ -295,11 +297,16 @@ export async function completeCandidate(
     const incomplete = NUTRIENT_KEYS.some((k) => !Number.isFinite(candidate.per100g[k]));
     let estimate: PartialNutrients | null = null;
 
+    // Candidates come from the browser: only the AI backfill path costs quota, so only it is gated.
     if (!isCustom && incomplete) {
+      const g = await guard("ai", AI_MAX_PER_HOUR, 3600);
+      if (!g.ok) return { ok: false, error: g.error };
+      const name = String(candidate.name ?? "").slice(0, 200);
+      const brand = candidate.brand ? String(candidate.brand).slice(0, 100) : "";
       try {
         const json = (await generateJson(
           getAi(),
-          [{ text: `Food: ${candidate.name}${candidate.brand ? ` (${candidate.brand})` : ""}` }],
+          [{ text: `Food: ${name}${brand ? ` (${brand})` : ""}` }],
           `You are a nutrition database. Estimate nutrients PER 100 g of the given food in EXACTLY these units: ${UNIT_LEGEND}. Do not output 0 for a nutrient the food actually contains. JSON only.`,
           ESTIMATE_SCHEMA,
         )) as { nutrients_per_100g?: unknown };
@@ -325,8 +332,10 @@ export async function resolveBarcode(
   barcode: string,
   lang: Lang,
 ): Promise<{ ok: true; item: ResolvedItem } | { ok: false; error: string }> {
-  const code = barcode.replace(/\s/g, "");
+  const code = String(barcode ?? "").replace(/\s/g, "");
   if (!/^\d{8,14}$/.test(code)) return { ok: false, error: "scan.invalid" };
+  const g = await guard("search", SEARCH_MAX_PER_MINUTE, 60);
+  if (!g.ok) return { ok: false, error: g.error };
   const candidate = await fetchOpenFoodFactsBarcode(code, normLang(lang));
   if (!candidate) return { ok: false, error: "scan.notFound" };
   return completeCandidate(candidate, candidate.serving_weight_g ?? 100, lang);
@@ -341,18 +350,16 @@ export async function parseRecipeIngredients(
   lang: Lang,
 ): Promise<{ ok: true; items: ResolvedItem[]; failed: number } | { ok: false; error: string }> {
   const l = normLang(lang);
-  const raw = text?.trim().slice(0, 2000);
+  const raw = typeof text === "string" ? text.trim().slice(0, 2000) : "";
   if (!raw) return { ok: false, error: "error.noInput" };
   try {
-    const supabase = await createSupabaseServerClient();
-    const { data: userData } = await supabase.auth.getUser();
+    const g = await guard("ai", AI_MAX_PER_HOUR, 3600);
+    if (!g.ok) return { ok: false, error: g.error };
     let catalog: CustomCatalog = [];
-    if (userData.user) {
-      try {
-        catalog = await loadCustomCatalog(supabase, userData.user.id);
-      } catch {
-        catalog = [];
-      }
+    try {
+      catalog = await loadCustomCatalog(g.supabase, g.userId);
+    } catch {
+      catalog = [];
     }
 
     let detected: DetectedItem[];

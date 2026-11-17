@@ -18,7 +18,7 @@ function Section({ icon, title, children }: { icon: ReactNode; title: string; ch
   );
 }
 
-export function AppGuideModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function AppGuideModal({ open, onClose, onOpenLegal }: { open: boolean; onClose: () => void; onOpenLegal: () => void }) {
   const { t } = useI18n();
 
   useEffect(() => {
@@ -91,6 +91,13 @@ export function AppGuideModal({ open, onClose }: { open: boolean; onClose: () =>
             <p>{t("guide.s4.ios")}</p>
             <p>{t("guide.s4.android")}</p>
           </Section>
+
+          <p className="px-1 text-xs text-neutral-500">
+            {t("guide.storageNotice")}{" "}
+            <button onClick={onOpenLegal} className="underline">
+              {t("legal.open")}
+            </button>
+          </p>
         </div>
 
         <div className="border-t border-neutral-200 p-4 pb-[max(1rem,env(safe-area-inset-bottom))] dark:border-neutral-800">
