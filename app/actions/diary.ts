@@ -42,6 +42,10 @@ async function authed() {
 
 const UNAUTH = { ok: false, error: "error.unauthenticated" } as const;
 
+function dbError(prefix: string, e: { message?: string; code?: string } | null | undefined) {
+  return { ok: false, error: `${prefix}: ${e?.message ?? "unknown error"}${e?.code ? ` (${e.code})` : ""}` } as const;
+}
+
 function vectorFromRow(row: Record<string, unknown>): NutrientVector {
   const v = emptyNutrients();
   for (const k of NUTRIENT_KEYS) v[k] = Number(row[k] ?? 0) || 0;
@@ -108,14 +112,14 @@ export async function saveMeal(input: SaveMealInput): Promise<ActionResult<{ id:
   const a = await authed();
   if (!a) return UNAUTH;
   if (!DATE_RE.test(input.date) || !MEALS.includes(input.mealType) || !input.items?.length) {
-    return { ok: false, error: "common.error" };
+    return { ok: false, error: `Failed to save meal: invalid input (date=${input.date}, meal=${input.mealType}, items=${input.items?.length ?? 0})` };
   }
   const { data: meal, error } = await a.supabase
     .from("meal_logs")
     .insert({ user_id: a.userId, logged_date: input.date, meal_type: input.mealType })
     .select("id")
     .single();
-  if (error || !meal) return { ok: false, error: "common.error" };
+  if (error || !meal) return dbError("Failed to save meal", error);
 
   const rows = input.items
     .filter((i) => i.grams > 0)
@@ -126,14 +130,18 @@ export async function saveMeal(input: SaveMealInput): Promise<ActionResult<{ id:
       item_name: String(i.name).slice(0, 160),
       source_type: SOURCES.includes(i.source) ? i.source : "manual",
       source_ref_id: i.source_ref_id,
-      grams: Math.min(i.grams, 10000),
-      confidence: Math.min(1, Math.max(0, i.confidence ?? 0)),
+      grams: Math.round(Math.min(Math.max(Number(i.grams) || 0, 0.01), 10000) * 100) / 100,
+      confidence: Math.round(Math.min(1, Math.max(0, Number(i.confidence) || 0)) * 100) / 100,
       ...cleanVector(i.nutrients),
     }));
+  if (rows.length === 0) {
+    await a.supabase.from("meal_logs").delete().eq("id", meal.id);
+    return { ok: false, error: "Failed to save meal: no item with a weight above 0 g" };
+  }
   const { error: itemsError } = await a.supabase.from("meal_log_items").insert(rows);
   if (itemsError) {
     await a.supabase.from("meal_logs").delete().eq("id", meal.id); // no half-saved meals
-    return { ok: false, error: "common.error" };
+    return dbError("Failed to save meal items", itemsError);
   }
   return { ok: true, data: { id: meal.id } };
 }

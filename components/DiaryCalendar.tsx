@@ -55,34 +55,40 @@ export function DiaryCalendar({
     return { from: g[0], to: g[g.length - 1] };
   }, [mode, date]);
 
-  const loadKey = `${range.from}|${range.to}|${mode}|${refreshKey}`;
-  const loading = loadedKey !== loadKey;
+  const totalsKey = `${range.from}|${range.to}|${refreshKey}`;
+  const mealsKey = `${date}|${refreshKey}`;
+  const loading = loadedKey !== `${totalsKey}#${mealsKey}`;
 
-  const fetchRange = useCallback(async () => {
-    const [tot, ml] = await Promise.all([
-      getDailyTotals(range.from, range.to),
-      mode === "day" ? getMeals(range.from, range.to) : Promise.resolve(null),
-    ]);
-    return { tot, ml };
-  }, [range, mode]);
+  const fetchTotals = useCallback(() => getDailyTotals(range.from, range.to), [range]);
 
   useEffect(() => {
     let stale = false;
-    fetchRange().then(({ tot, ml }) => {
+    fetchTotals().then((tot) => {
       if (stale) return;
       if (tot.ok) setTotals(tot.data);
-      if (ml?.ok) setMeals(ml.data);
-      setLoadedKey(loadKey);
+      setLoadedKey((k) => `${totalsKey}#${k.split("#")[1] ?? ""}`);
     });
     return () => {
       stale = true;
     };
-  }, [fetchRange, loadKey]);
+  }, [fetchTotals, totalsKey]);
+
+  useEffect(() => {
+    let stale = false;
+    getMeals(date, date).then((ml) => {
+      if (stale) return;
+      if (ml.ok) setMeals(ml.data);
+      setLoadedKey((k) => `${k.split("#")[0]}#${mealsKey}`);
+    });
+    return () => {
+      stale = true;
+    };
+  }, [date, mealsKey]);
 
   async function reload() {
-    const { tot, ml } = await fetchRange();
+    const [tot, ml] = await Promise.all([fetchTotals(), getMeals(date, date)]);
     if (tot.ok) setTotals(tot.data);
-    if (ml?.ok) setMeals(ml.data);
+    if (ml.ok) setMeals(ml.data);
   }
 
   function step(dir: 1 | -1) {
@@ -106,15 +112,8 @@ export function DiaryCalendar({
   const weekdayLabels = weekDays.map((d) => parseDateKey(d).toLocaleDateString(locale, { weekday: "narrow" }));
 
   const barTotals = useMemo(() => {
-    if (mode === "day") return totals[date] ?? emptyNutrients();
-    if (mode === "week") {
-      const sum = sumNutrients(weekDays.map((d) => totals[d] ?? emptyNutrients()));
-      const avg = emptyNutrients();
-      (Object.keys(avg) as NutrientKey[]).forEach((k) => (avg[k] = Math.round((sum[k] / 7) * 100) / 100));
-      return avg; // average per day over the week
-    }
-    return emptyNutrients();
-  }, [mode, totals, date, weekDays]);
+    return totals[date] ?? emptyNutrients(); // selected day, in every view
+  }, [totals, date]);
 
   function dayDot(d: string) {
     const v = totals[d];
@@ -167,11 +166,9 @@ export function DiaryCalendar({
             return (
               <button
                 key={d}
-                onClick={() => {
-                  setDate(d);
-                  setMode("day");
-                }}
-                className={`flex aspect-square flex-col items-center justify-center rounded-lg ${inMonth ? "" : "opacity-40"} ${d === today ? "ring-2 ring-green-600" : ""} hover:bg-neutral-100 dark:hover:bg-neutral-800`}
+                onClick={() => setDate(d)}
+                aria-pressed={d === date}
+                className={`flex aspect-square flex-col items-center justify-center rounded-lg ${inMonth ? "" : "opacity-40"} ${d === today ? "ring-2 ring-green-600" : ""} ${d === date ? "bg-green-600 text-white" : "hover:bg-neutral-100 dark:hover:bg-neutral-800"}`}
               >
                 <span>{parseDateKey(d).getDate()}</span>
                 <span className={`mt-0.5 h-1.5 w-1.5 rounded-full ${dot ?? "bg-transparent"}`} />
@@ -186,11 +183,9 @@ export function DiaryCalendar({
           {weekDays.map((d, i) => (
             <button
               key={d}
-              onClick={() => {
-                setDate(d);
-                setMode("day");
-              }}
-              className={`flex flex-col items-center rounded-lg py-2 hover:bg-neutral-100 dark:hover:bg-neutral-800 ${d === today ? "ring-2 ring-green-600" : ""}`}
+              onClick={() => setDate(d)}
+              aria-pressed={d === date}
+              className={`flex flex-col items-center rounded-lg py-2 ${d === date ? "bg-green-600/15 ring-2 ring-green-600" : "hover:bg-neutral-100 dark:hover:bg-neutral-800"} ${d === today && d !== date ? "ring-2 ring-green-300" : ""}`}
             >
               <span className="text-xs uppercase text-neutral-500">{weekdayLabels[i]}</span>
               <span>{parseDateKey(d).getDate()}</span>
@@ -201,7 +196,17 @@ export function DiaryCalendar({
         </div>
       )}
 
-      {mode === "day" && (
+      {mode !== "day" && (
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold capitalize">
+            {parseDateKey(date).toLocaleDateString(locale, { weekday: "long", day: "numeric", month: "long" })}
+          </h3>
+          <button onClick={() => setMode("day")} className="text-sm text-green-700 underline dark:text-green-400">
+            {t("diary.editInDay")}
+          </button>
+        </div>
+      )}
+
         <div className="space-y-3">
           {meals.length === 0 && !loading && <p className="text-sm text-neutral-500">{t("diary.empty")}</p>}
           {meals.map((m) => {
@@ -238,14 +243,10 @@ export function DiaryCalendar({
             );
           })}
         </div>
-      )}
 
-      {mode !== "month" && (
-        <div className="rounded-2xl border border-neutral-200 p-4 dark:border-neutral-800">
-          {mode === "week" && <p className="mb-3 text-xs text-neutral-500">{t("diary.avgPerDay")}</p>}
-          <NutrientBars totals={barTotals} targets={targets} />
-        </div>
-      )}
+      <div className="rounded-2xl border border-neutral-200 p-4 dark:border-neutral-800">
+        <NutrientBars totals={barTotals} targets={targets} />
+      </div>
       {loading && <span className="sr-only">{nutrient("calories_kcal")}…</span>}
     </section>
   );
