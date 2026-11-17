@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BookOpen, CalendarDays, Camera, Loader2, LogOut, Settings } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, HelpCircle, Loader2, LogOut, Settings } from "lucide-react";
 import { getProfile } from "@/app/actions/diary";
 import { useI18n } from "@/lib/i18n";
 import { createSupabaseBrowserClient } from "@/lib/supabase";
 import { resolveTargets, toDateKey } from "@/lib/targets";
 import { DEFAULT_PROFILE, type ResolvedItem, type UserProfile } from "@/types/nutrition";
+import { AppGuideModal } from "./AppGuideModal";
 import { AuthModal, EPHEMERAL_KEY } from "./AuthModal";
 import { CaptureModule } from "./CaptureModule";
 import { DecompositionCard } from "./DecompositionCard";
@@ -15,6 +16,8 @@ import { RecipeBuilder } from "./RecipeBuilder";
 import { TargetEditor } from "./TargetEditor";
 
 type Tab = "log" | "diary" | "recipes";
+
+const GUIDE_SEEN_KEY = "nutri_tracker_guide_seen";
 
 export function AppShell() {
   const { t, setLang } = useI18n();
@@ -26,6 +29,24 @@ export function AppShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [diaryDate, setDiaryDate] = useState(() => toDateKey(new Date()));
   const [refreshKey, setRefreshKey] = useState(0);
+  const [guideOpen, setGuideOpen] = useState(false);
+
+  useEffect(() => {
+    try {
+      if (!window.localStorage.getItem(GUIDE_SEEN_KEY)) setGuideOpen(true);
+    } catch {
+      /* storage unavailable (private mode): skip auto-open */
+    }
+  }, []);
+
+  const closeGuide = useCallback(() => {
+    setGuideOpen(false);
+    try {
+      window.localStorage.setItem(GUIDE_SEEN_KEY, "true");
+    } catch {
+      /* storage unavailable */
+    }
+  }, []);
 
   const loadProfile = useCallback(async () => {
     const res = await getProfile();
@@ -91,16 +112,21 @@ export function AppShell() {
     <div className="mx-auto flex min-h-dvh w-full max-w-2xl flex-col">
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-neutral-200 bg-white/90 px-4 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/90">
         <h1 className="text-lg font-bold text-green-700 dark:text-green-400">{t("app.name")}</h1>
+        <div className="flex items-center gap-1">
+          <button onClick={() => setGuideOpen(true)} aria-label={t("guide.open")} title={t("guide.open")} className="rounded-full p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800">
+            <HelpCircle className="h-5 w-5" />
+          </button>
         {authState === "ready" && (
-          <div className="flex items-center gap-1">
+          <>
             <button onClick={signOut} aria-label={t("auth.signOut")} title={t("auth.signOut")} className="rounded-full p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800">
               <LogOut className="h-5 w-5" />
             </button>
             <button onClick={() => setSettingsOpen(true)} aria-label={t("nav.settings")} className="rounded-full p-2 hover:bg-neutral-100 dark:hover:bg-neutral-800">
               <Settings className="h-5 w-5" />
             </button>
-          </div>
+          </>
         )}
+        </div>
       </header>
 
       <main className="flex-1 space-y-4 px-4 pb-28 pt-4">
@@ -165,6 +191,7 @@ export function AppShell() {
         </nav>
       )}
 
+      <AppGuideModal open={guideOpen} onClose={closeGuide} />
       {settingsOpen && <TargetEditor open profile={profile} onClose={() => setSettingsOpen(false)} onSaved={setProfile} />}
     </div>
   );

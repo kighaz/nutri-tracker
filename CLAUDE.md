@@ -8,7 +8,9 @@
 
 ## Architecture & File Map
 - `types/nutrition.ts`: Canonical 6 macros + 13 micronutrients schema (normalized to `mg` and `mcg`)
-- `lib/i18n.ts`: Bilingual FR/EN dictionary
+- `lib/i18n.ts`: Trilingual FR/EN/DE dictionary (default `fr`); all UI strings go through `t()`, including the `guide.*` keys
+- `components/AppShell.tsx`: Header, tab nav, auth state; opens the guide on first visit (`localStorage` key `nutri_tracker_guide_seen`) and via the header `HelpCircle` button
+- `components/AppGuideModal.tsx`: Onboarding / user guide modal (what the app is, privacy, logging meals, recipes & targets, PWA install tip)
 - `lib/supabase.ts`: Supabase client & server helpers
 - `lib/nutrition-resolver.ts`: Hybrid lookup (1. Custom Recipes -> 2. OpenFoodFacts/USDA -> 3. Gemini fallback)
 - `app/actions/analyze-food.ts`: Server action for in-memory base64 photo analysis (zero image storage)
