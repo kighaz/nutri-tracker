@@ -1,8 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { Camera, ImageIcon, Loader2, Search } from "lucide-react";
-import { analyzeFood } from "@/app/actions/analyze-food";
+import { useCallback, useRef, useState } from "react";
+import { Camera, ImageIcon, Loader2, ScanBarcode, Search } from "lucide-react";
+import { analyzeFood, resolveBarcode } from "@/app/actions/analyze-food";
+import { BarcodeScanner } from "./BarcodeScanner";
 import { compressImage } from "@/lib/image";
 import { useI18n } from "@/lib/i18n";
 import type { ResolvedItem } from "@/types/nutrition";
@@ -16,6 +17,7 @@ export function CaptureModule({
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
   const cameraRef = useRef<HTMLInputElement>(null);
   const galleryRef = useRef<HTMLInputElement>(null);
 
@@ -41,6 +43,19 @@ export function CaptureModule({
       if (galleryRef.current) galleryRef.current.value = "";
     }
   }
+
+  const handleBarcode = useCallback(
+    async (code: string) => {
+      setScanning(false);
+      setBusy(true);
+      setError(null);
+      const res = await resolveBarcode(code, lang);
+      setBusy(false);
+      if (res.ok) onResult([res.item], []);
+      else setError(res.error);
+    },
+    [lang, onResult],
+  );
 
   async function handleText(e: React.FormEvent) {
     e.preventDefault();
@@ -80,6 +95,15 @@ export function CaptureModule({
         <input ref={galleryRef} type="file" accept="image/*" hidden onChange={(e) => handleFile(e.target.files?.[0])} />
       </div>
 
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => setScanning(true)}
+        className="flex w-full items-center justify-center gap-2 rounded-xl border border-neutral-300 py-3 text-sm font-medium hover:bg-neutral-100 disabled:opacity-60 dark:border-neutral-700 dark:hover:bg-neutral-800"
+      >
+        <ScanBarcode className="h-5 w-5" aria-hidden /> {t("scan.button")}
+      </button>
+
       <form onSubmit={handleText} className="flex gap-2">
         <div className="relative flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" aria-hidden />
@@ -103,6 +127,7 @@ export function CaptureModule({
       <p className="text-xs text-neutral-500">{t("capture.photoDiscarded")}</p>
       {busy && <p className="text-sm text-neutral-600 dark:text-neutral-400">{t("capture.analyzing")}</p>}
       {error && <p className="text-sm text-red-600">{t(error)}</p>}
+      {scanning && <BarcodeScanner onDetected={handleBarcode} onClose={() => setScanning(false)} />}
     </section>
   );
 }

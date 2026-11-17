@@ -6,6 +6,7 @@ import {
   NUTRIENT_KEYS,
   computeRecipe,
   emptyNutrients,
+  normLang,
   type MealType,
   type NutrientTargets,
   type NutrientVector,
@@ -94,7 +95,7 @@ export async function saveProfile(p: UserProfile): Promise<ActionResult<true>> {
     height_cm: p.height_cm,
     sex: p.sex,
     activity_level: p.activity_level,
-    preferred_language: p.preferred_language === "en" ? "en" : "fr",
+    preferred_language: normLang(p.preferred_language),
     nutrient_targets: targets,
   });
   return error ? { ok: false, error: "common.error" } : { ok: true, data: true };
@@ -144,6 +145,7 @@ export async function getMeals(from: string, to: string): Promise<ActionResult<L
   const { data, error } = await a.supabase
     .from("meal_logs")
     .select("id, logged_date, meal_type, note, meal_log_items(*)")
+    .eq("user_id", a.userId)
     .gte("logged_date", from)
     .lte("logged_date", to)
     .order("logged_date")
@@ -175,6 +177,7 @@ export async function getDailyTotals(from: string, to: string): Promise<ActionRe
   const { data, error } = await a.supabase
     .from("daily_nutrient_totals")
     .select("*")
+    .eq("user_id", a.userId)
     .gte("logged_date", from)
     .lte("logged_date", to);
   if (error) return { ok: false, error: "common.error" };
@@ -186,7 +189,7 @@ export async function getDailyTotals(from: string, to: string): Promise<ActionRe
 export async function deleteMeal(id: string): Promise<ActionResult<true>> {
   const a = await authed();
   if (!a) return UNAUTH;
-  const { error } = await a.supabase.from("meal_logs").delete().eq("id", id);
+  const { error } = await a.supabase.from("meal_logs").delete().eq("id", id).eq("user_id", a.userId);
   return error ? { ok: false, error: "common.error" } : { ok: true, data: true };
 }
 
@@ -242,7 +245,7 @@ export async function saveRecipe(input: SaveRecipeInput): Promise<ActionResult<{
 export async function listRecipes(): Promise<ActionResult<RecipeSummary[]>> {
   const a = await authed();
   if (!a) return UNAUTH;
-  const { data, error } = await a.supabase.from("custom_recipes").select("*").order("created_at", { ascending: false });
+  const { data, error } = await a.supabase.from("custom_recipes").select("*").eq("user_id", a.userId).order("created_at", { ascending: false });
   if (error) return { ok: false, error: "common.error" };
   return {
     ok: true,
@@ -261,6 +264,6 @@ export async function listRecipes(): Promise<ActionResult<RecipeSummary[]>> {
 export async function deleteRecipe(id: string): Promise<ActionResult<true>> {
   const a = await authed();
   if (!a) return UNAUTH;
-  const { error } = await a.supabase.from("custom_recipes").delete().eq("id", id);
+  const { error } = await a.supabase.from("custom_recipes").delete().eq("id", id).eq("user_id", a.userId);
   return error ? { ok: false, error: "common.error" } : { ok: true, data: true };
 }

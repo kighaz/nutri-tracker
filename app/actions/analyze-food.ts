@@ -4,6 +4,7 @@ import { GoogleGenAI } from "@google/genai";
 import { createSupabaseServerClient } from "@/lib/supabase";
 import {
   buildCustomContext,
+  fetchOpenFoodFactsBarcode,
   loadCustomCatalog,
   resolveDetectedItem,
   resolveFromCandidate,
@@ -20,6 +21,7 @@ import {
   type FoodCandidate,
   type FoodType,
   type Lang,
+  normLang,
   type PartialNutrients,
   type ResolvedItem,
   type SearchFoodsResult,
@@ -49,6 +51,7 @@ const DETECTION_SCHEMA = {
         properties: {
           name_fr: { type: "string" },
           name_en: { type: "string" },
+          name_de: { type: "string" },
           grams: { type: "number", minimum: 1 },
           confidence: { type: "number", minimum: 0, maximum: 1 },
           food_type: { type: "string", enum: ["whole_food", "packaged", "dish"] },
@@ -63,6 +66,7 @@ const DETECTION_SCHEMA = {
         required: [
           "name_fr",
           "name_en",
+          "name_de",
           "grams",
           "confidence",
           "food_type",
@@ -80,11 +84,11 @@ const UNIT_LEGEND = NUTRIENT_KEYS.map((k) => `${k} (${NUTRIENT_UNITS[k]})`).join
 
 function buildSystemInstruction(catalog: CustomCatalog, hasImage: boolean): string {
   return [
-    "You are a precise clinical-nutrition assistant fluent in French and English.",
+    "You are a precise clinical-nutrition assistant fluent in French, English and German.",
     hasImage
       ? "Decompose the meal in the photo into individual food items (one entry per distinct food on the plate)."
       : "Decompose the user's text into individual food items. If quantities are given, honour them; otherwise assume one typical adult portion.",
-    "For each item give: name_fr, name_en (both languages, concrete wording that includes cooking state, e.g. 'chicken breast, roasted'), estimated edible weight in grams, confidence 0..1, food_type (whole_food | packaged | dish), barcode (digits only if clearly readable on a package, else null).",
+    "For each item give: name_fr, name_en, name_de (all three languages, concrete wording that includes cooking state, e.g. 'chicken breast, roasted'), estimated edible weight in grams, confidence 0..1, food_type (whole_food | packaged | dish), barcode (digits only if clearly readable on a package, else null).",
     "USER'S SAVED CUSTOM RECIPES / FOODS (match against these first):",
     buildCustomContext(catalog),
     "If an item is clearly one of the user's saved entries, set matched_custom_id to its exact id; otherwise null. Never invent ids.",
@@ -150,12 +154,14 @@ function parseDetected(json: unknown): DetectedItem[] {
   for (const r of items as Record<string, unknown>[]) {
     const name_fr = String(r.name_fr ?? "").trim();
     const name_en = String(r.name_en ?? "").trim();
-    if (!name_fr && !name_en) continue;
+    const name_de = String(r.name_de ?? "").trim();
+    if (!name_fr && !name_en && !name_de) continue;
     const grams = Number(r.grams);
     const conf = Number(r.confidence);
     out.push({
-      name_fr: name_fr || name_en,
-      name_en: name_en || name_fr,
+      name_fr: name_fr || name_en || name_de,
+      name_en: name_en || name_fr || name_de,
+      name_de: name_de || name_en || name_fr,
       grams: Number.isFinite(grams) && grams > 0 ? Math.min(grams, 5000) : 100,
       confidence: Number.isFinite(conf) ? Math.min(1, Math.max(0, conf)) : 0.5,
       food_type: FOOD_TYPES.includes(r.food_type as FoodType) ? (r.food_type as FoodType) : "whole_food",
@@ -176,7 +182,7 @@ export async function analyzeFood(input: AnalyzeFoodInput): Promise<AnalyzeFoodR
   let imageBase64: string | undefined = input.imageBase64?.replace(/^data:[^;]+;base64,/, "");
   const mimeType = input.mimeType ?? "image/jpeg";
   const text = input.text?.trim().slice(0, 500);
-  const lang: Lang = input.lang === "en" ? "en" : "fr";
+  const lang: Lang = normLang(input.lang);
 
   try {
     if (!imageBase64 && !text) return { ok: false, error: "error.noInput" };
@@ -204,7 +210,7 @@ export async function analyzeFood(input: AnalyzeFoodInput): Promise<AnalyzeFoodR
     parts.push({
       text: text
         ? `Meal description from the user (language: ${lang}): ${text}`
-        : `Analyze this meal photo. Reply with names in French and English.`,
+        : `Analyze this meal photo. Reply with names in French, English and German.`,
     });
 
     let detected: DetectedItem[];
@@ -261,7 +267,7 @@ export async function searchFoods(query: string, lang: Lang): Promise<SearchFood
     const supabase = await createSupabaseServerClient();
     const { data } = await supabase.auth.getUser();
     const catalog = data.user ? await loadCustomCatalog(supabase, data.user.id) : [];
-    const candidates = await searchAllSources(q, lang === "en" ? "en" : "fr", catalog);
+    const candidates = await searchAllSources(q, normLang(lang), catalog);
     return { ok: true, candidates };
   } catch {
     return { ok: false, error: "common.error" };
@@ -307,6 +313,80 @@ export async function completeCandidate(
       ok: true,
       item: resolveFromCandidate(candidate, { lang, grams: safeGrams, estimate }),
     };
+  } catch {
+    return { ok: false, error: "common.error" };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Server action: barcode -> OpenFoodFacts product (missing nutrients backfilled by Gemini)
+// ---------------------------------------------------------------------------
+export async function resolveBarcode(
+  barcode: string,
+  lang: Lang,
+): Promise<{ ok: true; item: ResolvedItem } | { ok: false; error: string }> {
+  const code = barcode.replace(/\s/g, "");
+  if (!/^\d{8,14}$/.test(code)) return { ok: false, error: "scan.invalid" };
+  const candidate = await fetchOpenFoodFactsBarcode(code, normLang(lang));
+  if (!candidate) return { ok: false, error: "scan.notFound" };
+  return completeCandidate(candidate, candidate.serving_weight_g ?? 100, lang);
+}
+
+// ---------------------------------------------------------------------------
+// Server action: bulk recipe parser. One Gemini call splits the pasted text into
+// ingredients + weights, then every ingredient is resolved concurrently (Promise.all).
+// ---------------------------------------------------------------------------
+export async function parseRecipeIngredients(
+  text: string,
+  lang: Lang,
+): Promise<{ ok: true; items: ResolvedItem[]; failed: number } | { ok: false; error: string }> {
+  const l = normLang(lang);
+  const raw = text?.trim().slice(0, 2000);
+  if (!raw) return { ok: false, error: "error.noInput" };
+  try {
+    const supabase = await createSupabaseServerClient();
+    const { data: userData } = await supabase.auth.getUser();
+    let catalog: CustomCatalog = [];
+    if (userData.user) {
+      try {
+        catalog = await loadCustomCatalog(supabase, userData.user.id);
+      } catch {
+        catalog = [];
+      }
+    }
+
+    let detected: DetectedItem[];
+    try {
+      const json = await generateJson(
+        getAi(),
+        [{ text: `Recipe ingredient list (language: ${l}): ${raw}` }],
+        [
+          "You are a precise clinical-nutrition assistant fluent in French, English and German.",
+          "Split the user's recipe ingredient list into one entry per ingredient (separators: commas, semicolons, new lines, 'and'/'et'/'und').",
+          "Honour the stated weight in grams exactly. Convert units: 1 kg = 1000 g, 1 tbsp/c. à soupe/EL = 15 g, 1 tsp/c. à café/TL = 5 g, 1 cup = 240 g, 1 egg = 50 g. If no quantity is given, assume a typical amount for a recipe.",
+          "For each item give name_fr, name_en, name_de (concrete wording that includes cooking state, e.g. 'riz cuit' / 'cooked rice' / 'Reis, gekocht'), grams, confidence 0..1, food_type (whole_food | packaged | dish), barcode null, matched_custom_id null.",
+          `nutrients_per_100g must be a realistic estimate PER 100 g in EXACTLY these units: ${UNIT_LEGEND}. Do not output 0 for a nutrient the food actually contains.`,
+          "Respond with JSON only.",
+        ].join("\n"),
+        DETECTION_SCHEMA,
+      );
+      detected = parseDetected(json);
+    } catch {
+      return { ok: false, error: "error.aiUnavailable" };
+    }
+
+    const settled = await Promise.allSettled(detected.map((d) => resolveDetectedItem(d, catalog, l)));
+    let failed = 0;
+    const items: ResolvedItem[] = settled.map((r, i) => {
+      if (r.status === "fulfilled") return r.value;
+      failed++;
+      return resolveFromCandidate(
+        { id: "", name: detected[i].name_en, brand: null, source: "usda", per100g: {}, serving_weight_g: null },
+        { lang: l, grams: detected[i].grams, confidence: detected[i].confidence, estimate: detected[i].estimate },
+      );
+    });
+    for (const it of items) if (it.source_ref_id === "") it.source = "ai_estimate";
+    return { ok: true, items, failed };
   } catch {
     return { ok: false, error: "common.error" };
   }

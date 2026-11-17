@@ -94,7 +94,7 @@ export function DiaryCalendar({
     }
   }
 
-  const locale = lang === "fr" ? "fr-FR" : "en-US";
+  const locale = lang === "fr" ? "fr-FR" : lang === "de" ? "de-DE" : "en-US";
   const title =
     mode === "month"
       ? parseDateKey(date).toLocaleDateString(locale, { month: "long", year: "numeric" })

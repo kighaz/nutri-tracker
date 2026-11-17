@@ -19,18 +19,30 @@ export function SourceBadge({ source }: { source: ResolvedItem["source"] }) {
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${color[source]}`}>{label(source)}</span>;
 }
 
-/** Bilingual food search (custom -> OpenFoodFacts -> USDA). Used for swapping and for recipe ingredients. */
+/** Per-session cache of search results so repeated ingredient lookups are instant. */
+const SEARCH_CACHE = new Map<string, FoodCandidate[]>();
+const SEARCH_CACHE_MAX = 80;
+
+function cacheSearch(key: string, value: FoodCandidate[]) {
+  if (SEARCH_CACHE.size >= SEARCH_CACHE_MAX) SEARCH_CACHE.delete(SEARCH_CACHE.keys().next().value as string);
+  SEARCH_CACHE.set(key, value);
+}
+
+/** Trilingual food search (custom -> OpenFoodFacts -> USDA). Used for swapping and for recipe ingredients. */
 export function FoodSearchModal({
   open,
   initialQuery = "",
   grams,
   onPick,
+  onPickCandidate,
   onClose,
 }: {
   open: boolean;
   initialQuery?: string;
   grams: number;
   onPick: (item: ResolvedItem) => void;
+  /** When set, the modal closes immediately and the caller completes the candidate in the background. */
+  onPickCandidate?: (candidate: FoodCandidate) => void;
   onClose: () => void;
 }) {
   const { t, lang } = useI18n();
@@ -47,15 +59,24 @@ export function FoodSearchModal({
   useEffect(() => {
     if (!open || !searchable) return;
     let stale = false;
+    const cacheKey = `${lang}|${q.toLowerCase()}`;
+    const hit = SEARCH_CACHE.get(cacheKey);
     const timer = setTimeout(async () => {
+      if (hit) {
+        setResults(hit);
+        setDoneQuery(q);
+        setError(null);
+        return;
+      }
       const res = await searchFoods(q, lang);
       if (stale) return;
       setDoneQuery(q);
       if (res.ok) {
+        cacheSearch(cacheKey, res.candidates);
         setResults(res.candidates);
         setError(null);
       } else setError(res.error);
-    }, 350);
+    }, hit ? 0 : 300);
     return () => {
       stale = true;
       clearTimeout(timer);
@@ -65,6 +86,11 @@ export function FoodSearchModal({
   if (!open) return null;
 
   async function pick(c: FoodCandidate) {
+    if (onPickCandidate) {
+      onPickCandidate(c);
+      onClose();
+      return;
+    }
     setPicking(c.id);
     const res = await completeCandidate(c, grams, lang);
     setPicking(null);

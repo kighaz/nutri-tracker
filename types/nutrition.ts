@@ -58,7 +58,11 @@ export const NUTRIENT_UNITS: Record<NutrientKey, CanonicalUnit> = {
 export type NutrientVector = Record<NutrientKey, number>;
 export type PartialNutrients = Partial<Record<NutrientKey, number>>;
 
-export type Lang = "fr" | "en";
+export type Lang = "fr" | "en" | "de";
+export const LANGS: readonly Lang[] = ["fr", "en", "de"];
+export function normLang(l: unknown): Lang {
+  return l === "en" || l === "de" ? l : "fr";
+}
 export type Sex = "male" | "female";
 export type ActivityLevel =
   | "sedentary"
@@ -81,6 +85,7 @@ export interface ResolvedItem {
   name: string; // display name in the requested language
   name_fr: string;
   name_en: string;
+  name_de?: string;
   grams: number;
   confidence: number; // 0..1
   source: SourceType;

@@ -3,9 +3,10 @@
 import { useState } from "react";
 import { Loader2, X } from "lucide-react";
 import { saveProfile } from "@/app/actions/diary";
-import { useI18n } from "@/lib/i18n";
+import { LANG_NAMES, useI18n } from "@/lib/i18n";
 import { resolveTargets } from "@/lib/targets";
 import {
+  LANGS,
   MACRO_KEYS,
   MICRO_KEYS,
   NUTRIENT_UNITS,
@@ -32,6 +33,9 @@ export function TargetEditor({
   const [draft, setDraft] = useState<UserProfile>(profile);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Text of the target input currently being edited. "" is a valid value while the user backspaces;
+  // the numeric draft is only updated on blur / Enter / Save, so the input is never unmounted mid-edit.
+  const [typing, setTyping] = useState<{ key: NutrientKey; text: string } | null>(null);
 
   if (!open) return null;
   const resolved = resolveTargets(draft);
@@ -44,13 +48,31 @@ export function TargetEditor({
     setDraft({ ...draft, nutrient_targets: next });
   }
 
+  function withCommit(base: UserProfile): UserProfile {
+    if (!typing) return base;
+    const value = parseFloat(typing.text.replace(",", ".")) || 0;
+    const next = { ...base.nutrient_targets };
+    if (value > 0) next[typing.key] = { mode: "manual", value };
+    else delete next[typing.key]; // empty / 0 -> back to the recommended value
+    return { ...base, nutrient_targets: next };
+  }
+
+  function commitTyping() {
+    if (!typing) return;
+    setDraft(withCommit(draft));
+    setTyping(null);
+  }
+
   async function save() {
     setSaving(true);
     setError(null);
-    const res = await saveProfile({ ...draft, preferred_language: lang });
+    const finalDraft = { ...withCommit(draft), preferred_language: lang };
+    setTyping(null);
+    setDraft(finalDraft);
+    const res = await saveProfile(finalDraft);
     setSaving(false);
     if (res.ok) {
-      onSaved({ ...draft, preferred_language: lang });
+      onSaved(finalDraft);
       onClose();
     } else setError(res.error);
   }
@@ -70,8 +92,8 @@ export function TargetEditor({
         <div className="flex-1 space-y-6 overflow-y-auto p-4">
           <div className="flex items-center gap-2 text-sm">
             <span>{t("settings.language")}</span>
-            {(["fr", "en"] as const).map((l) => (
-              <button key={l} onClick={() => setLang(l)} className={`rounded-lg px-3 py-1 ${lang === l ? "bg-green-600 text-white" : "border border-neutral-300 dark:border-neutral-700"}`}>
+            {LANGS.map((l) => (
+              <button key={l} onClick={() => setLang(l)} title={LANG_NAMES[l]} className={`rounded-lg px-3 py-1 ${lang === l ? "bg-green-600 text-white" : "border border-neutral-300 dark:border-neutral-700"}`}>
                 {l.toUpperCase()}
               </button>
             ))}
@@ -132,16 +154,25 @@ export function TargetEditor({
                       {manual ? (
                         <span className="flex w-28 items-center gap-1">
                           <input
-                            type="number"
-                            min={0}
-                            step="any"
-                            value={draft.nutrient_targets[k]?.value ?? ""}
-                            onChange={(e) =>
-                              setDraft({
-                                ...draft,
-                                nutrient_targets: { ...draft.nutrient_targets, [k]: { mode: "manual", value: Number(e.target.value) } },
-                              })
-                            }
+                            type="text"
+                            inputMode="decimal"
+                            autoComplete="off"
+                            value={typing?.key === k ? typing.text : String(draft.nutrient_targets[k]?.value ?? r.value)}
+                            onFocus={(e) => {
+                              if (typing?.key !== k) {
+                                commitTyping();
+                                setTyping({ key: k, text: String(draft.nutrient_targets[k]?.value ?? r.value) });
+                              }
+                              e.currentTarget.select();
+                            }}
+                            onChange={(e) => {
+                              const text = e.target.value;
+                              if (/^\d*[.,]?\d*$/.test(text)) setTyping({ key: k, text });
+                            }}
+                            onBlur={commitTyping}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") e.currentTarget.blur();
+                            }}
                             aria-label={nutrient(k)}
                             className="w-full rounded-lg border border-neutral-300 bg-transparent px-2 py-1 text-right tabular-nums dark:border-neutral-700"
                           />

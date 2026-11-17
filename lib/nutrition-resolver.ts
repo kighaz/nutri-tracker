@@ -23,6 +23,7 @@ const EXTERNAL_TIMEOUT_MS = 6000;
 export interface DetectedItem {
   name_fr: string;
   name_en: string;
+  name_de?: string;
   grams: number;
   confidence: number;
   food_type: FoodType;
@@ -161,13 +162,13 @@ const CUSTOM_MATCH_THRESHOLD = 0.82;
 
 export function findCustomMatch(
   catalog: CustomCatalog,
-  item: Pick<DetectedItem, "name_fr" | "name_en" | "matched_custom_id">,
+  item: Pick<DetectedItem, "name_fr" | "name_en" | "name_de" | "matched_custom_id">,
 ): CustomEntry | null {
   if (item.matched_custom_id) {
     const byId = catalog.find((e) => e.id === item.matched_custom_id);
     if (byId) return byId;
   }
-  const queries = [item.name_fr, item.name_en];
+  const queries = [item.name_fr, item.name_en, item.name_de ?? ""].filter(Boolean);
   let best: { e: CustomEntry; s: number } | null = null;
   for (const e of catalog) {
     const s = bestScore(queries, e.name);
@@ -197,7 +198,7 @@ export function searchCustomCatalog(catalog: CustomCatalog, query: string, limit
 // ---------------------------------------------------------------------------
 // Step B — OpenFoodFacts
 // ---------------------------------------------------------------------------
-const OFF_FIELDS = "code,product_name,product_name_fr,product_name_en,brands,nutriments,serving_quantity";
+const OFF_FIELDS = "code,product_name,product_name_fr,product_name_en,product_name_de,brands,nutriments,serving_quantity";
 
 const OFF_KEYS: Record<NutrientKey, string> = {
   calories_kcal: "energy-kcal",
@@ -251,14 +252,16 @@ interface OffProduct {
   product_name?: string;
   product_name_fr?: string;
   product_name_en?: string;
+  product_name_de?: string;
   brands?: string;
   nutriments?: Record<string, unknown>;
   serving_quantity?: number | string;
 }
 
 function offToCandidate(p: OffProduct, lang: Lang): FoodCandidate | null {
+  const localized = lang === "fr" ? p.product_name_fr : lang === "de" ? p.product_name_de : p.product_name_en;
   const name =
-    (lang === "fr" ? p.product_name_fr : p.product_name_en) || p.product_name || p.product_name_fr || p.product_name_en;
+    localized || p.product_name || p.product_name_fr || p.product_name_en || p.product_name_de;
   if (!name || !p.code) return null;
   const per100g = mapOffNutriments(p.nutriments);
   if (per100g.calories_kcal === undefined) return null;
@@ -288,7 +291,7 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 }
 
 export async function searchOpenFoodFacts(query: string, lang: Lang, limit = 6): Promise<FoodCandidate[]> {
-  const host = lang === "fr" ? "fr.openfoodfacts.org" : "world.openfoodfacts.org";
+  const host = lang === "fr" ? "fr.openfoodfacts.org" : lang === "de" ? "de.openfoodfacts.org" : "world.openfoodfacts.org";
   const url =
     `https://${host}/cgi/search.pl?search_terms=${encodeURIComponent(query)}` +
     `&search_simple=1&action=process&json=1&page_size=${limit * 2}&lc=${lang}` +
@@ -407,6 +410,7 @@ function pickBest(
 function buildItem(args: {
   name_fr: string;
   name_en: string;
+  name_de?: string;
   lang: Lang;
   grams: number;
   confidence: number;
@@ -420,10 +424,14 @@ function buildItem(args: {
   const { vector, backfilled, missing } = mergeMissing(args.primary, args.estimate);
   const grams = Math.max(1, Math.round(args.grams));
   return {
-    id: crypto.randomUUID(),
-    name: (args.lang === "fr" ? args.name_fr : args.name_en) || args.name_fr || args.name_en,
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+    name:
+      (args.lang === "fr" ? args.name_fr : args.lang === "de" ? args.name_de : args.name_en) ||
+      args.name_fr ||
+      args.name_en,
     name_fr: args.name_fr,
     name_en: args.name_en,
+    name_de: args.name_de,
     grams,
     confidence: Math.min(1, Math.max(0, args.confidence)),
     source: args.source,
@@ -447,11 +455,13 @@ export function resolveFromCandidate(
     estimate: PartialNutrients | null;
     name_fr?: string;
     name_en?: string;
+    name_de?: string;
   },
 ): ResolvedItem {
   return buildItem({
     name_fr: opts.name_fr ?? candidate.name,
     name_en: opts.name_en ?? candidate.name,
+    name_de: opts.name_de,
     lang: opts.lang,
     grams: opts.grams || candidate.serving_weight_g || 100,
     confidence: opts.confidence ?? 1,
@@ -478,6 +488,7 @@ export async function resolveDetectedItem(
   const common = {
     name_fr: item.name_fr,
     name_en: item.name_en,
+    name_de: item.name_de,
     lang,
     grams: item.grams,
     confidence: item.confidence,
@@ -499,8 +510,9 @@ export async function resolveDetectedItem(
   }
 
   // Step B
-  const queries = [item.name_fr, item.name_en].filter(Boolean);
-  const offQuery = lang === "fr" ? item.name_fr || item.name_en : item.name_en || item.name_fr;
+  const queries = [item.name_fr, item.name_en, item.name_de ?? ""].filter(Boolean);
+  const offQuery =
+    (lang === "fr" ? item.name_fr : lang === "de" ? item.name_de : item.name_en) || item.name_en || item.name_fr;
   const usdaQuery = item.name_en || item.name_fr;
   const minScore = item.food_type === "dish" ? 0.65 : 0.5;
 
@@ -530,6 +542,7 @@ export async function resolveDetectedItem(
       estimate: item.estimate,
       name_fr: item.name_fr,
       name_en: item.name_en,
+      name_de: item.name_de,
     });
   }
 

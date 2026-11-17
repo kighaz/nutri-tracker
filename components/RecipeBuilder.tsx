@@ -1,26 +1,44 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2, Plus, Sparkles, Trash2 } from "lucide-react";
+import { completeCandidate, parseRecipeIngredients } from "@/app/actions/analyze-food";
 import { deleteRecipe, listRecipes, saveRecipe } from "@/app/actions/diary";
 import { useI18n } from "@/lib/i18n";
 import type { RecipeSummary } from "@/types/diary";
-import { MACRO_KEYS, MICRO_KEYS, computeRecipe, type ResolvedItem } from "@/types/nutrition";
+import { MACRO_KEYS, MICRO_KEYS, computeRecipe, type FoodCandidate, type ResolvedItem } from "@/types/nutrition";
 import { formatAmount } from "./NutrientBars";
 import { FoodSearchModal, SourceBadge } from "./FoodSearchModal";
 
 interface Row {
-  item: ResolvedItem;
+  key: string;
+  name: string;
   grams: number;
+  /** null while the nutrient data is still being fetched in the background. */
+  item: ResolvedItem | null;
 }
 
+/** Completed candidates (nutrients backfilled) cached for the session: re-adding an ingredient is instant. */
+const COMPLETED_CACHE = new Map<string, ResolvedItem>();
+let rowSeq = 0;
+const newKey = () => `row-${Date.now().toString(36)}-${rowSeq++}`;
+
 export function RecipeBuilder() {
-  const { t, nutrient } = useI18n();
+  const { t, nutrient, lang } = useI18n();
   const [name, setName] = useState("");
   const [rows, setRows] = useState<Row[]>([]);
   const [cooked, setCooked] = useState("");
   const [servings, setServings] = useState("1");
   const [searching, setSearching] = useState(false);
+  const [bulkText, setBulkText] = useState("");
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [recipes, setRecipes] = useState<RecipeSummary[]>([]);
@@ -39,8 +57,49 @@ export function RecipeBuilder() {
     };
   }, []);
 
+  const resolvedRows = rows.filter((r): r is Row & { item: ResolvedItem } => r.item !== null);
+  const pending = rows.length - resolvedRows.length;
+
+  /** Adds the row instantly with the candidate's own data, then completes missing nutrients in the background. */
+  function addCandidate(c: FoodCandidate) {
+    const key = newKey();
+    const grams = c.serving_weight_g && c.serving_weight_g > 0 ? Math.round(c.serving_weight_g) : 100;
+    const cacheKey = `${lang}|${c.source}|${c.id}`;
+    const cached = COMPLETED_CACHE.get(cacheKey);
+    setRows((prev) => [...prev, { key, name: c.name, grams, item: cached ? { ...cached, id: key } : null }]);
+    if (cached) return;
+    completeCandidate(c, grams, lang).then((res) => {
+      if (!mounted.current) return;
+      if (res.ok) {
+        COMPLETED_CACHE.set(cacheKey, res.item);
+        setRows((prev) => prev.map((x) => (x.key === key ? { ...x, item: { ...res.item, id: key } } : x)));
+      } else {
+        setRows((prev) => prev.filter((x) => x.key !== key));
+        setMessage({ ok: false, text: t(res.error) });
+      }
+    });
+  }
+
+  async function addBulk() {
+    const text = bulkText.trim();
+    if (!text || bulkBusy) return;
+    setBulkBusy(true);
+    setMessage(null);
+    // One server round-trip: a single Gemini parse, then all ingredients resolved with Promise.all.
+    const res = await parseRecipeIngredients(text, lang);
+    if (!mounted.current) return;
+    setBulkBusy(false);
+    if (!res.ok) {
+      setMessage({ ok: false, text: t(res.error) });
+      return;
+    }
+    setRows((prev) => [...prev, ...res.items.map((item) => ({ key: item.id, name: item.name, grams: item.grams, item }))]);
+    setBulkText("");
+    if (res.failed > 0) setMessage({ ok: false, text: t("recipe.bulkFailed") });
+  }
+
   const calc = computeRecipe(
-    rows.map((r) => ({ grams: r.grams, per100g: r.item.per100g })),
+    resolvedRows.map((r) => ({ grams: r.grams, per100g: r.item.per100g })),
     cooked ? Number(cooked) : null,
     Number(servings) || 1,
   );
@@ -52,7 +111,7 @@ export function RecipeBuilder() {
       name,
       cookedWeightG: cooked ? Number(cooked) : null,
       totalServings: Number(servings) || 1,
-      ingredients: rows.map((r) => ({
+      ingredients: resolvedRows.map((r) => ({
         name: r.item.name,
         source: r.item.source,
         source_ref_id: r.item.source_ref_id,
@@ -87,10 +146,16 @@ export function RecipeBuilder() {
           <h3 className="mb-2 text-sm font-semibold">{t("recipe.ingredients")}</h3>
           <ul className="space-y-2">
             {rows.map((r, idx) => (
-              <li key={r.item.id} className="flex items-center gap-2 rounded-xl bg-neutral-50 p-2 dark:bg-neutral-900">
+              <li key={r.key} className="flex items-center gap-2 rounded-xl bg-neutral-50 p-2 dark:bg-neutral-900">
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{r.item.name}</p>
-                  <SourceBadge source={r.item.source} />
+                  <p className="truncate text-sm font-medium">{r.item?.name ?? r.name}</p>
+                  {r.item ? (
+                    <SourceBadge source={r.item.source} />
+                  ) : (
+                    <span className="flex items-center gap-1 text-xs text-neutral-500">
+                      <Loader2 className="h-3 w-3 animate-spin" /> {t("recipe.resolving")}
+                    </span>
+                  )}
                 </div>
                 <input
                   type="number"
@@ -98,7 +163,7 @@ export function RecipeBuilder() {
                   min={1}
                   value={r.grams}
                   onChange={(e) => setRows(rows.map((x, i) => (i === idx ? { ...x, grams: Math.max(0, Number(e.target.value)) } : x)))}
-                  aria-label={`${r.item.name} (g)`}
+                  aria-label={`${r.item?.name ?? r.name} (g)`}
                   className="w-20 rounded-lg border border-neutral-300 bg-transparent px-2 py-1 text-right tabular-nums dark:border-neutral-700"
                 />
                 <span className="text-sm">g</span>
@@ -108,6 +173,28 @@ export function RecipeBuilder() {
               </li>
             ))}
           </ul>
+          <div className="mt-3 space-y-2 rounded-xl bg-neutral-50 p-3 dark:bg-neutral-900">
+            <label className="flex items-center gap-1 text-sm font-medium" htmlFor="bulk-ingredients">
+              <Sparkles className="h-4 w-4 text-green-600" aria-hidden /> {t("recipe.bulkTitle")}
+            </label>
+            <textarea
+              id="bulk-ingredients"
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder={t("recipe.bulkPlaceholder")}
+              rows={3}
+              maxLength={2000}
+              className="w-full rounded-lg border border-neutral-300 bg-transparent px-3 py-2 text-base dark:border-neutral-700"
+            />
+            <button
+              onClick={addBulk}
+              disabled={bulkBusy || !bulkText.trim()}
+              className="flex items-center gap-2 rounded-xl bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
+            >
+              {bulkBusy && <Loader2 className="h-4 w-4 animate-spin" />}
+              {t("recipe.bulkAdd")}
+            </button>
+          </div>
           <button onClick={() => setSearching(true)} className="mt-2 flex items-center gap-1 rounded-xl border border-dashed border-neutral-400 px-3 py-2 text-sm hover:bg-neutral-100 dark:hover:bg-neutral-800">
             <Plus className="h-4 w-4" /> {t("recipe.addIngredient")}
           </button>
@@ -140,7 +227,7 @@ export function RecipeBuilder() {
           </label>
         </div>
 
-        {rows.length > 0 && (
+        {resolvedRows.length > 0 && (
           <div className="overflow-x-auto">
             <p className="mb-2 text-xs text-neutral-500">
               {t("recipe.rawWeight")}: {Math.round(calc.raw_weight_g)} g · {t("recipe.servingWeight")}: {Math.round(calc.serving_weight_g)} g
@@ -169,7 +256,7 @@ export function RecipeBuilder() {
         <div className="flex items-center gap-3">
           <button
             onClick={save}
-            disabled={saving || !name.trim() || rows.length === 0 || rows.every((r) => r.grams <= 0)}
+            disabled={saving || pending > 0 || !name.trim() || resolvedRows.length === 0 || resolvedRows.every((r) => r.grams <= 0)}
             className="flex items-center gap-2 rounded-xl bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50"
           >
             {saving && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -211,7 +298,8 @@ export function RecipeBuilder() {
           open
           grams={100}
           onClose={() => setSearching(false)}
-          onPick={(item) => setRows((prev) => [...prev, { item, grams: item.grams || 100 }])}
+          onPick={() => undefined}
+          onPickCandidate={addCandidate}
         />
       )}
     </div>

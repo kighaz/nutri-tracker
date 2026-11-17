@@ -23,7 +23,7 @@ create table public.user_profiles (
   sex text check (sex in ('male','female')),
   activity_level text not null default 'moderate'
     check (activity_level in ('sedentary','light','moderate','active','very_active')),
-  preferred_language text not null default 'fr' check (preferred_language in ('fr','en')),
+  preferred_language text not null default 'fr' check (preferred_language in ('fr','en','de')),
   nutrient_targets jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
